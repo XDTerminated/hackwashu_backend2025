@@ -1,12 +1,283 @@
-from fastapi import FastAPI
-from dotenv import load_dotenv
-import psycopg
+from fastapi import FastAPI, HTTPException, Depends
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+from datetime import datetime
+import asyncpg
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="Plant Game API")
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+async def get_db():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+class UserCreate(BaseModel):
+    username: str
+    email: EmailStr
+    money: float = 0.0
+
+class UsernameUpdate(BaseModel):
+    new_username: str
+
+class SeedPacketCreate(BaseModel):
+    cost: float
+    game: str
+
+class PlantCreate(BaseModel):
+    plant_type: str
+    size: float
+    rarity: str
+    x: Optional[float] = None
+    y: Optional[float] = None
+    max_growth_time: datetime
+
+class PlantPosition(BaseModel):
+    x: float
+    y: float
+
+class MoneyUpdate(BaseModel):
+    amount: float
+
+@app.post("/users/", status_code=201)
+async def create_user(user: UserCreate, conn: asyncpg.Connection = Depends(get_db)):
+    """Create a new user"""
+    try:
+        await conn.execute(
+            'INSERT INTO "user" (username, email, money) VALUES ($1, $2, $3)',
+            user.username, user.email, user.money
+        )
+        return {"message": "User created successfully", "email": user.email}
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
+
+@app.delete("/users/{email}")
+async def delete_user(email: str, conn: asyncpg.Connection = Depends(get_db)):
+    """Delete a user and all their associated data"""
+    async with conn.transaction():
+        await conn.execute('DELETE FROM inventory WHERE email = $1', email)
+        
+        seed_packets = await conn.fetch('SELECT seed_packet_id FROM seed_packet WHERE email = $1', email)
+        for sp in seed_packets:
+            await conn.execute('DELETE FROM seed_packet WHERE seed_packet_id = $1', sp['seed_packet_id'])
+        
+        plants = await conn.fetch('SELECT plant_id FROM plant WHERE email = $1', email)
+        for p in plants:
+            await conn.execute('DELETE FROM plant WHERE plant_id = $1', p['plant_id'])
+        
+        result = await conn.execute('DELETE FROM "user" WHERE email = $1', email)
+        
+        if result == "DELETE 0":
+            raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"message": "User deleted successfully"}
+
+@app.patch("/users/{email}/username")
+async def update_username(email: str, update: UsernameUpdate, conn: asyncpg.Connection = Depends(get_db)):
+    """Change a user's username"""
+    result = await conn.execute(
+        'UPDATE "user" SET username = $1 WHERE email = $2',
+        update.new_username, email
+    )
+    
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"message": "Username updated successfully", "new_username": update.new_username}
+
+@app.post("/users/{email}/seed-packets/", status_code=201)
+async def add_seed_packet(email: str, seed_packet: SeedPacketCreate, conn: asyncpg.Connection = Depends(get_db)):
+    """Add a seed packet to user's inventory"""
+    async with conn.transaction():
+        user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        seed_packet_id = await conn.fetchval(
+            'INSERT INTO seed_packet (cost, game, email) VALUES ($1, $2, $3) RETURNING seed_packet_id',
+            seed_packet.cost, seed_packet.game, email
+        )
+        
+        await conn.execute(
+            'INSERT INTO inventory (email, seed_packet_id, plant_id) VALUES ($1, $2, NULL)',
+            email, seed_packet_id
+        )
+    
+    return {"message": "Seed packet added to inventory", "seed_packet_id": seed_packet_id}
+
+@app.delete("/users/{email}/seed-packets/{seed_packet_id}")
+async def remove_seed_packet(email: str, seed_packet_id: int, conn: asyncpg.Connection = Depends(get_db)):
+    """Remove a seed packet from inventory"""
+    async with conn.transaction():
+        inventory_item = await conn.fetchrow(
+            'SELECT * FROM inventory WHERE email = $1 AND seed_packet_id = $2',
+            email, seed_packet_id
+        )
+        
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail="Seed packet not found in inventory")
+        
+        await conn.execute(
+            'DELETE FROM inventory WHERE email = $1 AND seed_packet_id = $2',
+            email, seed_packet_id
+        )
+        
+        await conn.execute('DELETE FROM seed_packet WHERE seed_packet_id = $1', seed_packet_id)
+    
+    return {"message": "Seed packet removed from inventory"}
+
+@app.post("/users/{email}/plants/", status_code=201)
+async def create_plant(email: str, plant: PlantCreate, conn: asyncpg.Connection = Depends(get_db)):
+    """Create a plant with specific parameters"""
+    async with conn.transaction():
+        user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        plant_id = await conn.fetchval(
+            'INSERT INTO plant (plant_type, size, rarity, x, y, max_growth_time, email) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING plant_id',
+            plant.plant_type, plant.size, plant.rarity, plant.x, plant.y, plant.max_growth_time, email
+        )
+        
+        await conn.execute(
+            'INSERT INTO inventory (email, seed_packet_id, plant_id) VALUES ($1, NULL, $2)',
+            email, plant_id
+        )
+    
+    return {"message": "Plant created and added to inventory", "plant_id": plant_id}
+
+@app.patch("/users/{email}/plants/{plant_id}/plant")
+async def plant_plant(email: str, plant_id: int, position: PlantPosition, conn: asyncpg.Connection = Depends(get_db)):
+    """Plant a plant from inventory (give it a position)"""
+    inventory_item = await conn.fetchrow(
+        'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
+        email, plant_id
+    )
+    
+    if not inventory_item:
+        raise HTTPException(status_code=404, detail="Plant not found in inventory")
+    
+    result = await conn.execute(
+        'UPDATE plant SET x = $1, y = $2 WHERE plant_id = $3 AND email = $4',
+        position.x, position.y, plant_id, email
+    )
+    
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Plant not found")
+    
+    return {"message": "Plant planted successfully", "x": position.x, "y": position.y}
+
+@app.patch("/users/{email}/plants/{plant_id}/shovel")
+async def shovel_plant(email: str, plant_id: int, conn: asyncpg.Connection = Depends(get_db)):
+    """Shovel a plant back into inventory (set position to NULL)"""
+    inventory_item = await conn.fetchrow(
+        'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
+        email, plant_id
+    )
+    
+    if not inventory_item:
+        raise HTTPException(status_code=404, detail="Plant not found in inventory")
+    
+    result = await conn.execute(
+        'UPDATE plant SET x = NULL, y = NULL WHERE plant_id = $1 AND email = $2',
+        plant_id, email
+    )
+    
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Plant not found")
+    
+    return {"message": "Plant shoveled back to inventory"}
+
+@app.delete("/users/{email}/plants/{plant_id}")
+async def remove_plant(email: str, plant_id: int, conn: asyncpg.Connection = Depends(get_db)):
+    """Remove a plant from inventory"""
+    async with conn.transaction():
+        inventory_item = await conn.fetchrow(
+            'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
+            email, plant_id
+        )
+        
+        if not inventory_item:
+            raise HTTPException(status_code=404, detail="Plant not found in inventory")
+        
+        await conn.execute(
+            'DELETE FROM inventory WHERE email = $1 AND plant_id = $2',
+            email, plant_id
+        )
+        
+        await conn.execute('DELETE FROM plant WHERE plant_id = $1', plant_id)
+    
+    return {"message": "Plant removed from inventory"}
+
+@app.patch("/users/{email}/money/add")
+async def add_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection = Depends(get_db)):
+    """Add money to user's account"""
+    result = await conn.execute(
+        'UPDATE "user" SET money = money + $1 WHERE email = $2',
+        update.amount, email
+    )
+    
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    new_balance = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
+    return {"message": "Money added successfully", "new_balance": new_balance}
+
+@app.patch("/users/{email}/money/deduct")
+async def deduct_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection = Depends(get_db)):
+    """Deduct money from user's account"""
+    current_money = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
+    
+    if current_money is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    if current_money < update.amount:
+        raise HTTPException(status_code=400, detail="Insufficient funds")
+    
+    result = await conn.execute(
+        'UPDATE "user" SET money = money - $1 WHERE email = $2',
+        update.amount, email
+    )
+    
+    new_balance = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
+    return {"message": "Money deducted successfully", "new_balance": new_balance}
+
+@app.get("/users/{email}")
+async def get_user(email: str, conn: asyncpg.Connection = Depends(get_db)):
+    """Get user information"""
+    user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return dict(user)
+
+@app.get("/users/{email}/inventory")
+async def get_inventory(email: str, conn: asyncpg.Connection = Depends(get_db)):
+    """Get user's inventory"""
+    seed_packets = await conn.fetch(
+        '''SELECT sp.* FROM seed_packet sp
+           JOIN inventory i ON sp.seed_packet_id = i.seed_packet_id
+           WHERE i.email = $1''',
+        email
+    )
+    
+    plants = await conn.fetch(
+        '''SELECT p.* FROM plant p
+           JOIN inventory i ON p.plant_id = i.plant_id
+           WHERE i.email = $1''',
+        email
+    )
+    
+    return {
+        "seed_packets": [dict(sp) for sp in seed_packets],
+        "plants": [dict(p) for p in plants]
+    }
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
