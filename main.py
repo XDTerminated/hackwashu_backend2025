@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 import jwt
 from jwt import PyJWKClient
+import random
 
 load_dotenv()
 
@@ -95,7 +96,7 @@ class MoneyChange(BaseModel):
 
 
 class PlantCreate(BaseModel):
-    rarity: int
+    plant_type: str
     x: float
     y: float
 
@@ -289,6 +290,30 @@ async def buy_fertilizer(
     }
 
 
+PLANT_SPECIES = {
+    "flower": {
+        0: ["common_daisy", "white_tulip", "yellow_dandelion"],
+        1: ["blue_iris", "pink_carnation", "purple_lavender"],
+        2: ["golden_orchid", "rainbow_rose", "celestial_lily"]
+    },
+    "tree": {
+        0: ["oak_sapling", "pine_sapling", "maple_sapling"],
+        1: ["cherry_blossom", "willow_tree", "magnolia_tree"],
+        2: ["ancient_oak", "crystal_tree", "world_tree"]
+    },
+    "herb": {
+        0: ["basil", "mint", "parsley"],
+        1: ["rosemary", "thyme", "sage"],
+        2: ["golden_herb", "moonlight_sage", "phoenix_basil"]
+    },
+    "vegetable": {
+        0: ["carrot", "lettuce", "tomato"],
+        1: ["bell_pepper", "eggplant", "pumpkin"],
+        2: ["golden_carrot", "dragon_fruit", "star_tomato"]
+    }
+}
+
+
 @app.post("/users/{email}/plants/", status_code=201)
 async def create_plant(
     email: str,
@@ -301,29 +326,63 @@ async def create_plant(
             status_code=403, detail="Cannot modify another user's plants"
         )
 
-    user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    async with conn.transaction():
+        user = await conn.fetchrow('SELECT money FROM "user" WHERE email = $1', email)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    if plant.rarity not in [0, 1, 2]:
-        raise HTTPException(
-            status_code=400, detail="Rarity must be 0, 1, or 2"
+        if user["money"] < 100:
+            raise HTTPException(
+                status_code=400, detail="Insufficient money. Need 100 to create a plant"
+            )
+
+        if plant.plant_type not in PLANT_SPECIES:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Invalid plant_type. Must be one of: {', '.join(PLANT_SPECIES.keys())}"
+            )
+
+        rand = random.random()
+        if rand < 0.79:
+            rarity = 0
+        elif rand < 0.99:
+            rarity = 1
+        else:
+            rarity = 2
+
+        species_list = PLANT_SPECIES[plant.plant_type][rarity]
+        plant_species = random.choice(species_list)
+
+        await conn.execute(
+            'UPDATE "user" SET money = money - 100 WHERE email = $1',
+            email
         )
 
-    plant_id = await conn.fetchval(
-        """INSERT INTO plant (plant_type, size, rarity, x, y, stage, growth_time_remaining, email)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING plant_id""",
-        "default",
-        0.0,
-        plant.rarity,
-        plant.x,
-        plant.y,
-        0,
-        None,
-        email,
-    )
+        plant_id = await conn.fetchval(
+            """INSERT INTO plant (plant_type, plant_species, size, rarity, x, y, stage, growth_time_remaining, email)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING plant_id""",
+            plant.plant_type,
+            plant_species,
+            0.0,
+            rarity,
+            plant.x,
+            plant.y,
+            0,
+            None,
+            email,
+        )
 
-    return {"message": "Plant created successfully", "plant_id": plant_id}
+        new_balance = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
+
+    return {
+        "message": "Plant created successfully",
+        "plant_id": plant_id,
+        "plant_type": plant.plant_type,
+        "plant_species": plant_species,
+        "rarity": rarity,
+        "money_spent": 100,
+        "new_balance": new_balance
+    }
 
 
 @app.patch("/users/{email}/plants/{plant_id}/position")
