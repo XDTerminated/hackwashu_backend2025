@@ -10,7 +10,7 @@ import random
 
 load_dotenv()
 
-app = FastAPI(title="Pomodoro Patch API")
+app = FastAPI(title="Pomo Patch API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -112,7 +112,7 @@ class GrowthTimeUpdate(BaseModel):
 
 @app.get("/")
 async def read_root():
-    return {"message": "Welcome to the Pomodoro Patch API"}
+    return {"message": "Welcome to the Pomo Patch API"}
 
 
 @app.post("/users/", status_code=201)
@@ -127,13 +127,24 @@ async def create_user(
         )
 
     try:
+        # Check if username already exists
+        existing_username = await conn.fetchval(
+            'SELECT email FROM "user" WHERE username = $1',
+            user.username
+        )
+        if existing_username:
+            raise HTTPException(
+                status_code=400, detail="Username already taken"
+            )
+
         await conn.execute(
-            'INSERT INTO "user" (username, email, money, water, fertilizer) VALUES ($1, $2, $3, $4, $5)',
+            'INSERT INTO "user" (username, email, money, water, fertilizer, plant_limit) VALUES ($1, $2, $3, $4, $5, $6)',
             user.username,
             user.email,
             250.0,
             0,
             0,
+            50,
         )
         return {
             "message": "User created successfully",
@@ -142,6 +153,7 @@ async def create_user(
             "money": 250.0,
             "water": 0,
             "fertilizer": 0,
+            "plant_limit": 25,
         }
     except asyncpg.UniqueViolationError:
         raise HTTPException(
@@ -159,6 +171,16 @@ async def update_username(
     if email != auth_email:
         raise HTTPException(
             status_code=403, detail="Cannot update another user's username"
+        )
+
+    existing_username = await conn.fetchval(
+        'SELECT email FROM "user" WHERE username = $1 AND email != $2',
+        update.new_username,
+        email
+    )
+    if existing_username:
+        raise HTTPException(
+            status_code=400, detail="Username already taken"
         )
 
     result = await conn.execute(
@@ -237,11 +259,11 @@ async def buy_water(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
         
-        if user["money"] < 10:
+        if user["money"] < 25:
             raise HTTPException(status_code=400, detail="Insufficient money to buy water")
         
         await conn.execute(
-            'UPDATE "user" SET money = money - 10, water = water + 1 WHERE email = $1',
+            'UPDATE "user" SET money = money - 25, water = water + 1 WHERE email = $1',
             email
         )
         
@@ -290,6 +312,53 @@ async def buy_fertilizer(
     }
 
 
+@app.post("/users/{email}/increase-plant-limit")
+async def increase_plant_limit(
+    email: str,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plant limit"
+        )
+
+    async with conn.transaction():
+        user = await conn.fetchrow('SELECT money, plant_limit FROM "user" WHERE email = $1', email)
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        num_upgrades = (user["plant_limit"] - 25) // 25
+        base_cost = 1000
+        cost = round(int(base_cost * (1.1 ** num_upgrades)), -2)
+        
+        if user["money"] < cost:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Insufficient money to increase plant limit. Need {cost}, have {user['money']}"
+            )
+        
+        await conn.execute(
+            'UPDATE "user" SET money = money - $1, plant_limit = plant_limit + 50 WHERE email = $2',
+            cost,
+            email
+        )
+        
+        new_money = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
+        new_plant_limit = await conn.fetchval('SELECT plant_limit FROM "user" WHERE email = $1', email)
+        
+        next_cost = round(int(base_cost * (1.1 ** (num_upgrades + 1))), -2)
+
+    return {
+        "message": "Plant limit increased successfully",
+        "cost_paid": cost,
+        "new_money": new_money,
+        "new_plant_limit": new_plant_limit,
+        "next_upgrade_cost": next_cost
+    }
+
+
 PLANT_SPECIES = {
     "flower": {
         0: ["common_daisy", "white_tulip", "yellow_dandelion"],
@@ -327,9 +396,20 @@ async def create_plant(
         )
 
     async with conn.transaction():
-        user = await conn.fetchrow('SELECT money FROM "user" WHERE email = $1', email)
+        user = await conn.fetchrow('SELECT money, plant_limit FROM "user" WHERE email = $1', email)
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
+
+        current_plant_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM plant WHERE email = $1",
+            email
+        )
+        
+        if current_plant_count >= user["plant_limit"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Plant limit reached. Current: {current_plant_count}/{user['plant_limit']}"
+            )
 
         if user["money"] < 100:
             raise HTTPException(
@@ -662,6 +742,28 @@ async def get_user(
         raise HTTPException(status_code=404, detail="User not found")
     return dict(user)
 
+@app.get("/users/{email}/plants/{plant_id}")
+async def get_user_plant(
+    email: str,
+    plant_id: int,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot view another user's plant"
+        )
+
+    plant = await conn.fetchrow(
+        "SELECT * FROM plant WHERE plant_id = $1 AND email = $2",
+        plant_id,
+        email,
+    )
+
+    if not plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+
+    return dict(plant)
 
 @app.get("/users/{email}/plants")
 async def get_user_plants(
