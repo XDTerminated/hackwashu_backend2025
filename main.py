@@ -360,26 +360,21 @@ async def increase_plant_limit(
 
 
 PLANT_SPECIES = {
-    "flower": {
-        0: ["common_daisy", "white_tulip", "yellow_dandelion"],
-        1: ["blue_iris", "pink_carnation", "purple_lavender"],
-        2: ["golden_orchid", "rainbow_rose", "celestial_lily"]
+    "fungi": {
+        0: ["brown_mushroom"],
+        1: ["red_mushroom"],
+        2: ["mario_mushroom"]
     },
-    "tree": {
-        0: ["oak_sapling", "pine_sapling", "maple_sapling"],
-        1: ["cherry_blossom", "willow_tree", "magnolia_tree"],
-        2: ["ancient_oak", "crystal_tree", "world_tree"]
+    "rose": {
+        0: ["red_rose"],
+        1: ["pink_rose", "white_rose"],
+        2: ["withered_rose"]
     },
-    "herb": {
-        0: ["basil", "mint", "parsley"],
-        1: ["rosemary", "thyme", "sage"],
-        2: ["golden_herb", "moonlight_sage", "phoenix_basil"]
+    "berry": {
+        0: ["blueberries"],
+        1: ["strawberry"],
+        2: ["ancient_fruit"]
     },
-    "vegetable": {
-        0: ["carrot", "lettuce", "tomato"],
-        1: ["bell_pepper", "eggplant", "pumpkin"],
-        2: ["golden_carrot", "dragon_fruit", "star_tomato"]
-    }
 }
 
 
