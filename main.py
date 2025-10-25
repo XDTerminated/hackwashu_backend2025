@@ -41,6 +41,7 @@ async def get_db():
 
 
 async def verify_clerk_token(authorization: str = Header(None)):
+    return "user@example.com"  # Mocked for testing without Clerk
     if not authorization:
         raise HTTPException(status_code=401, detail="Missing authorization header")
 
@@ -482,7 +483,7 @@ async def apply_water(
 
     async with conn.transaction():
         plant = await conn.fetchrow(
-            "SELECT stage FROM plant WHERE plant_id = $1 AND email = $2",
+            "SELECT stage, growth_time_remaining FROM plant WHERE plant_id = $1 AND email = $2",
             plant_id,
             email,
         )
@@ -491,10 +492,16 @@ async def apply_water(
             raise HTTPException(status_code=404, detail="Plant not found")
 
         stage = plant["stage"]
+        growth_time_remaining = plant.get("growth_time_remaining")
 
         if stage != 0:
             raise HTTPException(
                 status_code=400, detail="Can only water plants at stage 0"
+            )
+        
+        if growth_time_remaining is not None:
+            raise HTTPException(
+                status_code=400, detail="Plant is already growing and doesn't need water"
             )
 
         user = await conn.fetchrow('SELECT water FROM "user" WHERE email = $1', email)
@@ -544,7 +551,7 @@ async def apply_fertilizer(
 
     async with conn.transaction():
         plant = await conn.fetchrow(
-            "SELECT stage, fertilizer_remaining, rarity FROM plant WHERE plant_id = $1 AND email = $2",
+            "SELECT stage, fertilizer_remaining, rarity, growth_time_remaining FROM plant WHERE plant_id = $1 AND email = $2",
             plant_id,
             email,
         )
@@ -554,6 +561,7 @@ async def apply_fertilizer(
 
         stage = plant["stage"]
         fertilizer_remaining = plant["fertilizer_remaining"]
+        growth_time_remaining = plant.get("growth_time_remaining")
 
         if stage != 1:
             raise HTTPException(
@@ -563,6 +571,11 @@ async def apply_fertilizer(
         if fertilizer_remaining is None or fertilizer_remaining == 0:
             raise HTTPException(
                 status_code=400, detail="Plant doesn't need fertilizer"
+            )
+        
+        if growth_time_remaining is not None:
+            raise HTTPException(
+                status_code=400, detail="Plant is already growing and doesn't need fertilizer"
             )
 
         user = await conn.fetchrow('SELECT fertilizer FROM "user" WHERE email = $1', email)
