@@ -1,8 +1,6 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr
-from typing import Optional
-from datetime import datetime
 import asyncpg
 import os
 from dotenv import load_dotenv
@@ -25,7 +23,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
@@ -87,25 +84,25 @@ async def verify_clerk_token(authorization: str = Header(None)):
 class UserCreate(BaseModel):
     username: str
     email: EmailStr
-    money: float = 0.0
 
 
 class UsernameUpdate(BaseModel):
     new_username: str
 
 
-class SeedPacketCreate(BaseModel):
-    cost: float
-    game: str
+class MoneyChange(BaseModel):
+    amount: float
 
+class WaterChange(BaseModel):
+    amount: int
+
+class FertilizerChange(BaseModel):
+    amount: int
 
 class PlantCreate(BaseModel):
-    plant_type: str
-    size: float
-    rarity: str
-    x: Optional[float] = None
-    y: Optional[float] = None
-    max_growth_time: datetime
+    rarity: int
+    x: float
+    y: float
 
 
 class PlantPosition(BaseModel):
@@ -113,8 +110,8 @@ class PlantPosition(BaseModel):
     y: float
 
 
-class MoneyUpdate(BaseModel):
-    amount: float
+class GrowthTimeUpdate(BaseModel):
+    time: int
 
 
 @app.get("/")
@@ -135,51 +132,25 @@ async def create_user(
 
     try:
         await conn.execute(
-            'INSERT INTO "user" (username, email, money) VALUES ($1, $2, $3)',
+            'INSERT INTO "user" (username, email, money, water, fertilizer) VALUES ($1, $2, $3, $4, $5)',
             user.username,
             user.email,
-            user.money,
+            250.0,
+            0,
+            0,
         )
-        return {"message": "User created successfully", "email": user.email}
+        return {
+            "message": "User created successfully",
+            "email": user.email,
+            "username": user.username,
+            "money": 250.0,
+            "water": 0,
+            "fertilizer": 0,
+        }
     except asyncpg.UniqueViolationError:
         raise HTTPException(
             status_code=400, detail="User with this email already exists"
         )
-
-
-@app.delete("/users/{email}")
-async def delete_user(
-    email: str,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot delete another user's account"
-        )
-
-    async with conn.transaction():
-        await conn.execute("DELETE FROM inventory WHERE email = $1", email)
-
-        seed_packets = await conn.fetch(
-            "SELECT seed_packet_id FROM seed_packet WHERE email = $1", email
-        )
-        for sp in seed_packets:
-            await conn.execute(
-                "DELETE FROM seed_packet WHERE seed_packet_id = $1",
-                sp["seed_packet_id"],
-            )
-
-        plants = await conn.fetch("SELECT plant_id FROM plant WHERE email = $1", email)
-        for p in plants:
-            await conn.execute("DELETE FROM plant WHERE plant_id = $1", p["plant_id"])
-
-        result = await conn.execute('DELETE FROM "user" WHERE email = $1', email)
-
-        if result == "DELETE 0":
-            raise HTTPException(status_code=404, detail="User not found")
-
-    return {"message": "User deleted successfully"}
 
 
 @app.patch("/users/{email}/username")
@@ -207,216 +178,31 @@ async def update_username(
     }
 
 
-@app.post("/users/{email}/seed-packets/", status_code=201)
-async def add_seed_packet(
+@app.delete("/users/{email}")
+async def delete_user(
     email: str,
-    seed_packet: SeedPacketCreate,
     conn: asyncpg.Connection = Depends(get_db),
     auth_email: str = Depends(verify_clerk_token),
 ):
     if email != auth_email:
         raise HTTPException(
-            status_code=403, detail="Cannot modify another user's inventory"
+            status_code=403, detail="Cannot delete another user's account"
         )
 
     async with conn.transaction():
-        user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
-        if not user:
+        await conn.execute("DELETE FROM plant WHERE email = $1", email)
+        result = await conn.execute('DELETE FROM "user" WHERE email = $1', email)
+
+        if result == "DELETE 0":
             raise HTTPException(status_code=404, detail="User not found")
 
-        seed_packet_id = await conn.fetchval(
-            "INSERT INTO seed_packet (cost, game, email) VALUES ($1, $2, $3) RETURNING seed_packet_id",
-            seed_packet.cost,
-            seed_packet.game,
-            email,
-        )
-
-        await conn.execute(
-            "INSERT INTO inventory (email, seed_packet_id, plant_id) VALUES ($1, $2, NULL)",
-            email,
-            seed_packet_id,
-        )
-
-    return {
-        "message": "Seed packet added to inventory",
-        "seed_packet_id": seed_packet_id,
-    }
+    return {"message": "User deleted successfully"}
 
 
-@app.delete("/users/{email}/seed-packets/{seed_packet_id}")
-async def remove_seed_packet(
+@app.patch("/users/{email}/money")
+async def change_money(
     email: str,
-    seed_packet_id: int,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot modify another user's inventory"
-        )
-
-    async with conn.transaction():
-        inventory_item = await conn.fetchrow(
-            "SELECT * FROM inventory WHERE email = $1 AND seed_packet_id = $2",
-            email,
-            seed_packet_id,
-        )
-
-        if not inventory_item:
-            raise HTTPException(
-                status_code=404, detail="Seed packet not found in inventory"
-            )
-
-        await conn.execute(
-            "DELETE FROM inventory WHERE email = $1 AND seed_packet_id = $2",
-            email,
-            seed_packet_id,
-        )
-
-        await conn.execute(
-            "DELETE FROM seed_packet WHERE seed_packet_id = $1", seed_packet_id
-        )
-
-    return {"message": "Seed packet removed from inventory"}
-
-
-@app.post("/users/{email}/plants/", status_code=201)
-async def create_plant(
-    email: str,
-    plant: PlantCreate,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot modify another user's inventory"
-        )
-
-    async with conn.transaction():
-        user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-
-        plant_id = await conn.fetchval(
-            "INSERT INTO plant (plant_type, size, rarity, x, y, max_growth_time, email) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING plant_id",
-            plant.plant_type,
-            plant.size,
-            plant.rarity,
-            plant.x,
-            plant.y,
-            plant.max_growth_time,
-            email,
-        )
-
-        await conn.execute(
-            "INSERT INTO inventory (email, seed_packet_id, plant_id) VALUES ($1, NULL, $2)",
-            email,
-            plant_id,
-        )
-
-    return {"message": "Plant created and added to inventory", "plant_id": plant_id}
-
-
-@app.patch("/users/{email}/plants/{plant_id}/plant")
-async def plant_plant(
-    email: str,
-    plant_id: int,
-    position: PlantPosition,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot modify another user's plants"
-        )
-
-    inventory_item = await conn.fetchrow(
-        "SELECT * FROM inventory WHERE email = $1 AND plant_id = $2", email, plant_id
-    )
-
-    if not inventory_item:
-        raise HTTPException(status_code=404, detail="Plant not found in inventory")
-
-    result = await conn.execute(
-        "UPDATE plant SET x = $1, y = $2 WHERE plant_id = $3 AND email = $4",
-        position.x,
-        position.y,
-        plant_id,
-        email,
-    )
-
-    if result == "UPDATE 0":
-        raise HTTPException(status_code=404, detail="Plant not found")
-
-    return {"message": "Plant planted successfully", "x": position.x, "y": position.y}
-
-
-@app.patch("/users/{email}/plants/{plant_id}/shovel")
-async def shovel_plant(
-    email: str,
-    plant_id: int,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot modify another user's plants"
-        )
-
-    inventory_item = await conn.fetchrow(
-        "SELECT * FROM inventory WHERE email = $1 AND plant_id = $2", email, plant_id
-    )
-
-    if not inventory_item:
-        raise HTTPException(status_code=404, detail="Plant not found in inventory")
-
-    result = await conn.execute(
-        "UPDATE plant SET x = NULL, y = NULL WHERE plant_id = $1 AND email = $2",
-        plant_id,
-        email,
-    )
-
-    if result == "UPDATE 0":
-        raise HTTPException(status_code=404, detail="Plant not found")
-
-    return {"message": "Plant shoveled back to inventory"}
-
-
-@app.delete("/users/{email}/plants/{plant_id}")
-async def remove_plant(
-    email: str,
-    plant_id: int,
-    conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
-):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot modify another user's inventory"
-        )
-
-    async with conn.transaction():
-        inventory_item = await conn.fetchrow(
-            "SELECT * FROM inventory WHERE email = $1 AND plant_id = $2",
-            email,
-            plant_id,
-        )
-
-        if not inventory_item:
-            raise HTTPException(status_code=404, detail="Plant not found in inventory")
-
-        await conn.execute(
-            "DELETE FROM inventory WHERE email = $1 AND plant_id = $2", email, plant_id
-        )
-
-        await conn.execute("DELETE FROM plant WHERE plant_id = $1", plant_id)
-
-    return {"message": "Plant removed from inventory"}
-
-
-@app.patch("/users/{email}/money/add")
-async def add_money(
-    email: str,
-    update: MoneyUpdate,
+    update: MoneyChange,
     conn: asyncpg.Connection = Depends(get_db),
     auth_email: str = Depends(verify_clerk_token),
 ):
@@ -435,39 +221,309 @@ async def add_money(
     new_balance = await conn.fetchval(
         'SELECT money FROM "user" WHERE email = $1', email
     )
-    return {"message": "Money added successfully", "new_balance": new_balance}
+    return {"message": "Money updated successfully", "new_balance": new_balance}
 
-
-@app.patch("/users/{email}/money/deduct")
-async def deduct_money(
+@app.patch("/users/{email}/water")
+async def change_water(
     email: str,
-    update: MoneyUpdate,
+    update: WaterChange,
     conn: asyncpg.Connection = Depends(get_db),
     auth_email: str = Depends(verify_clerk_token),
 ):
     if email != auth_email:
         raise HTTPException(
-            status_code=403, detail="Cannot modify another user's money"
+            status_code=403, detail="Cannot modify another user's water"
         )
 
-    current_money = await conn.fetchval(
-        'SELECT money FROM "user" WHERE email = $1', email
+    result = await conn.execute(
+        'UPDATE "user" SET water = water + $1 WHERE email = $2', update.amount, email
     )
 
-    if current_money is None:
+    if result == "UPDATE 0":
         raise HTTPException(status_code=404, detail="User not found")
 
-    if current_money < update.amount:
-        raise HTTPException(status_code=400, detail="Insufficient funds")
+    new_water = await conn.fetchval(
+        'SELECT water FROM "user" WHERE email = $1', email
+    )
+    return {"message": "Water updated successfully", "new_water": new_water}
+
+@app.patch("/users/{email}/fertilizer")
+async def change_fertilizer(
+    email: str,
+    update: FertilizerChange,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's fertilizer"
+        )
 
     result = await conn.execute(
-        'UPDATE "user" SET money = money - $1 WHERE email = $2', update.amount, email
+        'UPDATE "user" SET fertilizer = fertilizer + $1 WHERE email = $2', update.amount, email
     )
 
-    new_balance = await conn.fetchval(
-        'SELECT money FROM "user" WHERE email = $1', email
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="User not found")
+
+    new_fertilizer = await conn.fetchval(
+        'SELECT fertilizer FROM "user" WHERE email = $1', email
     )
-    return {"message": "Money deducted successfully", "new_balance": new_balance}
+    return {"message": "Fertilizer updated successfully", "new_fertilizer": new_fertilizer}
+
+
+@app.post("/users/{email}/plants/", status_code=201)
+async def create_plant(
+    email: str,
+    plant: PlantCreate,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if plant.rarity not in [0, 1, 2]:
+        raise HTTPException(
+            status_code=400, detail="Rarity must be 0, 1, or 2"
+        )
+
+    plant_id = await conn.fetchval(
+        """INSERT INTO plant (plant_type, size, rarity, x, y, stage, growth_time_remaining, email)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING plant_id""",
+        "default",
+        0.0,
+        plant.rarity,
+        plant.x,
+        plant.y,
+        0,
+        None,
+        email,
+    )
+
+    return {"message": "Plant created successfully", "plant_id": plant_id}
+
+
+@app.patch("/users/{email}/plants/{plant_id}/position")
+async def move_plant(
+    email: str,
+    plant_id: int,
+    position: PlantPosition,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    result = await conn.execute(
+        "UPDATE plant SET x = $1, y = $2 WHERE plant_id = $3 AND email = $4",
+        position.x,
+        position.y,
+        plant_id,
+        email,
+    )
+
+    if result == "UPDATE 0":
+        raise HTTPException(status_code=404, detail="Plant not found")
+
+    return {"message": "Plant moved successfully", "x": position.x, "y": position.y}
+
+
+@app.patch("/users/{email}/plants/{plant_id}/start-growing")
+async def start_growing_plant(
+    email: str,
+    plant_id: int,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    plant = await conn.fetchrow(
+        "SELECT stage, rarity FROM plant WHERE plant_id = $1 AND email = $2",
+        plant_id,
+        email,
+    )
+
+    if not plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+
+    stage = plant["stage"]
+    rarity = plant["rarity"]
+
+    if stage == 0:
+        growth_time = 30
+    elif stage == 1:
+        growth_times = {0: 60, 1: 120, 2: 360}
+        growth_time = growth_times[rarity]
+    else:
+        raise HTTPException(
+            status_code=400, detail="Plant is already fully grown (stage 2)"
+        )
+
+    result = await conn.execute(
+        "UPDATE plant SET growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
+        growth_time,
+        plant_id,
+        email,
+    )
+
+    return {
+        "message": "Plant started growing",
+        "growth_time_remaining": growth_time,
+    }
+
+
+@app.patch("/users/{email}/plants/{plant_id}/grow")
+async def grow_plant_by_time(
+    email: str,
+    plant_id: int,
+    update: GrowthTimeUpdate,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    plant = await conn.fetchrow(
+        "SELECT growth_time_remaining FROM plant WHERE plant_id = $1 AND email = $2",
+        plant_id,
+        email,
+    )
+
+    if not plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+
+    if plant["growth_time_remaining"] is None:
+        raise HTTPException(
+            status_code=400, detail="Plant is not currently growing"
+        )
+
+    new_time = max(0, plant["growth_time_remaining"] - update.time)
+
+    await conn.execute(
+        "UPDATE plant SET growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
+        new_time,
+        plant_id,
+        email,
+    )
+
+    return {
+        "message": "Plant growth updated",
+        "growth_time_remaining": new_time,
+    }
+
+
+@app.patch("/users/{email}/plants/{plant_id}/advance-stage")
+async def advance_plant_stage(
+    email: str,
+    plant_id: int,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    plant = await conn.fetchrow(
+        "SELECT stage FROM plant WHERE plant_id = $1 AND email = $2",
+        plant_id,
+        email,
+    )
+
+    if not plant:
+        raise HTTPException(status_code=404, detail="Plant not found")
+
+    current_stage = plant["stage"]
+
+    if current_stage >= 2:
+        raise HTTPException(
+            status_code=400, detail="Plant is already at maximum stage"
+        )
+
+    new_stage = current_stage + 1
+
+    await conn.execute(
+        "UPDATE plant SET stage = $1, growth_time_remaining = NULL WHERE plant_id = $2 AND email = $3",
+        new_stage,
+        plant_id,
+        email,
+    )
+
+    return {
+        "message": "Plant advanced to next stage",
+        "new_stage": new_stage,
+    }
+
+
+@app.delete("/users/{email}/plants/{plant_id}/sell")
+async def sell_plant(
+    email: str,
+    plant_id: int,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    async with conn.transaction():
+        plant = await conn.fetchrow(
+            "SELECT stage, rarity FROM plant WHERE plant_id = $1 AND email = $2",
+            plant_id,
+            email,
+        )
+
+        if not plant:
+            raise HTTPException(status_code=404, detail="Plant not found")
+
+        stage = plant["stage"]
+        rarity = plant["rarity"]
+
+        if stage == 0:
+            money_earned = 0
+        elif stage == 1:
+            money_values = {0: 50, 1: 100, 2: 250}
+            money_earned = money_values[rarity]
+        else:
+            money_values = {0: 100, 1: 200, 2: 500}
+            money_earned = money_values[rarity]
+
+        await conn.execute(
+            "DELETE FROM plant WHERE plant_id = $1 AND email = $2",
+            plant_id,
+            email,
+        )
+
+        if money_earned > 0:
+            await conn.execute(
+                'UPDATE "user" SET money = money + $1 WHERE email = $2',
+                money_earned,
+                email,
+            )
+
+        new_balance = await conn.fetchval(
+            'SELECT money FROM "user" WHERE email = $1', email
+        )
+
+    return {
+        "message": "Plant sold successfully",
+        "money_earned": money_earned,
+        "new_balance": new_balance,
+    }
 
 
 @app.get("/users/{email}")
@@ -487,35 +543,23 @@ async def get_user(
     return dict(user)
 
 
-@app.get("/users/{email}/inventory")
-async def get_inventory(
+@app.get("/users/{email}/plants")
+async def get_user_plants(
     email: str,
     conn: asyncpg.Connection = Depends(get_db),
     auth_email: str = Depends(verify_clerk_token),
 ):
     if email != auth_email:
         raise HTTPException(
-            status_code=403, detail="Cannot view another user's inventory"
+            status_code=403, detail="Cannot view another user's plants"
         )
 
-    seed_packets = await conn.fetch(
-        """SELECT sp.* FROM seed_packet sp
-           JOIN inventory i ON sp.seed_packet_id = i.seed_packet_id
-           WHERE i.email = $1""",
-        email,
-    )
-
     plants = await conn.fetch(
-        """SELECT p.* FROM plant p
-           JOIN inventory i ON p.plant_id = i.plant_id
-           WHERE i.email = $1""",
+        "SELECT * FROM plant WHERE email = $1",
         email,
     )
 
-    return {
-        "seed_packets": [dict(sp) for sp in seed_packets],
-        "plants": [dict(p) for p in plants],
-    }
+    return {"plants": [dict(p) for p in plants]}
 
 
 if __name__ == "__main__":
