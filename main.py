@@ -1,15 +1,22 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import datetime
 import asyncpg
 import os
 from dotenv import load_dotenv
+import jwt
+from jwt import PyJWKClient
+
 load_dotenv()
 
-app = FastAPI(title="Plant Game API")
+app = FastAPI(title="Pomodoro Patch API")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+CLERK_SECRET_KEY = os.getenv("CLERK_SECRET_KEY")
+CLERK_JWKS_URL = os.getenv("CLERK_JWKS_URL")
+
+jwks_client = PyJWKClient(CLERK_JWKS_URL)
 
 async def get_db():
     conn = await asyncpg.connect(DATABASE_URL)
@@ -17,6 +24,38 @@ async def get_db():
         yield conn
     finally:
         await conn.close()
+
+async def verify_clerk_token(authorization: str = Header(None)):
+    """Verify Clerk JWT token and return user email"""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing authorization header")
+    
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Invalid authentication scheme")
+        
+        signing_key = jwks_client.get_signing_key_from_jwt(token)
+        
+        payload = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            options={"verify_exp": True}
+        )
+        
+        email = payload.get("email")
+        if not email:
+            raise HTTPException(status_code=401, detail="Email not found in token")
+        
+        return email
+    
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
 
 class UserCreate(BaseModel):
     username: str
@@ -45,9 +84,20 @@ class PlantPosition(BaseModel):
 class MoneyUpdate(BaseModel):
     amount: float
 
+@app.get("/")
+async def read_root():
+    return {"message": "Welcome to the Pomodoro Patch API"}
+
 @app.post("/users/", status_code=201)
-async def create_user(user: UserCreate, conn: asyncpg.Connection = Depends(get_db)):
-    """Create a new user"""
+async def create_user(
+    user: UserCreate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
+    """Create a new user (authenticated)"""
+    if user.email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot create user with different email")
+    
     try:
         await conn.execute(
             'INSERT INTO "user" (username, email, money) VALUES ($1, $2, $3)',
@@ -58,8 +108,15 @@ async def create_user(user: UserCreate, conn: asyncpg.Connection = Depends(get_d
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
 @app.delete("/users/{email}")
-async def delete_user(email: str, conn: asyncpg.Connection = Depends(get_db)):
+async def delete_user(
+    email: str, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Delete a user and all their associated data"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot delete another user's account")
+    
     async with conn.transaction():
         await conn.execute('DELETE FROM inventory WHERE email = $1', email)
         
@@ -79,8 +136,16 @@ async def delete_user(email: str, conn: asyncpg.Connection = Depends(get_db)):
     return {"message": "User deleted successfully"}
 
 @app.patch("/users/{email}/username")
-async def update_username(email: str, update: UsernameUpdate, conn: asyncpg.Connection = Depends(get_db)):
+async def update_username(
+    email: str, 
+    update: UsernameUpdate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Change a user's username"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot update another user's username")
+    
     result = await conn.execute(
         'UPDATE "user" SET username = $1 WHERE email = $2',
         update.new_username, email
@@ -92,8 +157,16 @@ async def update_username(email: str, update: UsernameUpdate, conn: asyncpg.Conn
     return {"message": "Username updated successfully", "new_username": update.new_username}
 
 @app.post("/users/{email}/seed-packets/", status_code=201)
-async def add_seed_packet(email: str, seed_packet: SeedPacketCreate, conn: asyncpg.Connection = Depends(get_db)):
+async def add_seed_packet(
+    email: str, 
+    seed_packet: SeedPacketCreate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Add a seed packet to user's inventory"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's inventory")
+    
     async with conn.transaction():
         user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
         if not user:
@@ -112,8 +185,16 @@ async def add_seed_packet(email: str, seed_packet: SeedPacketCreate, conn: async
     return {"message": "Seed packet added to inventory", "seed_packet_id": seed_packet_id}
 
 @app.delete("/users/{email}/seed-packets/{seed_packet_id}")
-async def remove_seed_packet(email: str, seed_packet_id: int, conn: asyncpg.Connection = Depends(get_db)):
+async def remove_seed_packet(
+    email: str, 
+    seed_packet_id: int, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Remove a seed packet from inventory"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's inventory")
+    
     async with conn.transaction():
         inventory_item = await conn.fetchrow(
             'SELECT * FROM inventory WHERE email = $1 AND seed_packet_id = $2',
@@ -133,8 +214,16 @@ async def remove_seed_packet(email: str, seed_packet_id: int, conn: asyncpg.Conn
     return {"message": "Seed packet removed from inventory"}
 
 @app.post("/users/{email}/plants/", status_code=201)
-async def create_plant(email: str, plant: PlantCreate, conn: asyncpg.Connection = Depends(get_db)):
+async def create_plant(
+    email: str, 
+    plant: PlantCreate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Create a plant with specific parameters"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's inventory")
+    
     async with conn.transaction():
         user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
         if not user:
@@ -153,8 +242,17 @@ async def create_plant(email: str, plant: PlantCreate, conn: asyncpg.Connection 
     return {"message": "Plant created and added to inventory", "plant_id": plant_id}
 
 @app.patch("/users/{email}/plants/{plant_id}/plant")
-async def plant_plant(email: str, plant_id: int, position: PlantPosition, conn: asyncpg.Connection = Depends(get_db)):
+async def plant_plant(
+    email: str, 
+    plant_id: int, 
+    position: PlantPosition, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Plant a plant from inventory (give it a position)"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's plants")
+    
     inventory_item = await conn.fetchrow(
         'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
         email, plant_id
@@ -174,8 +272,16 @@ async def plant_plant(email: str, plant_id: int, position: PlantPosition, conn: 
     return {"message": "Plant planted successfully", "x": position.x, "y": position.y}
 
 @app.patch("/users/{email}/plants/{plant_id}/shovel")
-async def shovel_plant(email: str, plant_id: int, conn: asyncpg.Connection = Depends(get_db)):
+async def shovel_plant(
+    email: str, 
+    plant_id: int, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Shovel a plant back into inventory (set position to NULL)"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's plants")
+    
     inventory_item = await conn.fetchrow(
         'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
         email, plant_id
@@ -195,8 +301,16 @@ async def shovel_plant(email: str, plant_id: int, conn: asyncpg.Connection = Dep
     return {"message": "Plant shoveled back to inventory"}
 
 @app.delete("/users/{email}/plants/{plant_id}")
-async def remove_plant(email: str, plant_id: int, conn: asyncpg.Connection = Depends(get_db)):
+async def remove_plant(
+    email: str, 
+    plant_id: int, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Remove a plant from inventory"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's inventory")
+    
     async with conn.transaction():
         inventory_item = await conn.fetchrow(
             'SELECT * FROM inventory WHERE email = $1 AND plant_id = $2',
@@ -216,8 +330,16 @@ async def remove_plant(email: str, plant_id: int, conn: asyncpg.Connection = Dep
     return {"message": "Plant removed from inventory"}
 
 @app.patch("/users/{email}/money/add")
-async def add_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection = Depends(get_db)):
+async def add_money(
+    email: str, 
+    update: MoneyUpdate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Add money to user's account"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's money")
+    
     result = await conn.execute(
         'UPDATE "user" SET money = money + $1 WHERE email = $2',
         update.amount, email
@@ -230,8 +352,16 @@ async def add_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection = 
     return {"message": "Money added successfully", "new_balance": new_balance}
 
 @app.patch("/users/{email}/money/deduct")
-async def deduct_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection = Depends(get_db)):
+async def deduct_money(
+    email: str, 
+    update: MoneyUpdate, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Deduct money from user's account"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot modify another user's money")
+    
     current_money = await conn.fetchval('SELECT money FROM "user" WHERE email = $1', email)
     
     if current_money is None:
@@ -249,16 +379,30 @@ async def deduct_money(email: str, update: MoneyUpdate, conn: asyncpg.Connection
     return {"message": "Money deducted successfully", "new_balance": new_balance}
 
 @app.get("/users/{email}")
-async def get_user(email: str, conn: asyncpg.Connection = Depends(get_db)):
+async def get_user(
+    email: str, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Get user information"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot view another user's information")
+    
     user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     return dict(user)
 
 @app.get("/users/{email}/inventory")
-async def get_inventory(email: str, conn: asyncpg.Connection = Depends(get_db)):
+async def get_inventory(
+    email: str, 
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token)
+):
     """Get user's inventory"""
+    if email != auth_email:
+        raise HTTPException(status_code=403, detail="Cannot view another user's inventory")
+    
     seed_packets = await conn.fetch(
         '''SELECT sp.* FROM seed_packet sp
            JOIN inventory i ON sp.seed_packet_id = i.seed_packet_id
