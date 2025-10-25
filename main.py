@@ -83,7 +83,6 @@ async def verify_clerk_token(authorization: str = Header(None)):
 
 
 class UserCreate(BaseModel):
-    username: str
     email: EmailStr
 
 
@@ -127,19 +126,11 @@ async def create_user(
         )
 
     try:
-        # Check if username already exists
-        existing_username = await conn.fetchval(
-            'SELECT email FROM "user" WHERE username = $1',
-            user.username
-        )
-        if existing_username:
-            raise HTTPException(
-                status_code=400, detail="Username already taken"
-            )
+        username = user.email.split('@')[0]
 
         await conn.execute(
             'INSERT INTO "user" (username, email, money, water, fertilizer, plant_limit) VALUES ($1, $2, $3, $4, $5, $6)',
-            user.username,
+            username,
             user.email,
             250.0,
             0,
@@ -149,7 +140,7 @@ async def create_user(
         return {
             "message": "User created successfully",
             "email": user.email,
-            "username": user.username,
+            "username": username,
             "money": 250.0,
             "water": 0,
             "fertilizer": 0,
@@ -171,16 +162,6 @@ async def update_username(
     if email != auth_email:
         raise HTTPException(
             status_code=403, detail="Cannot update another user's username"
-        )
-
-    existing_username = await conn.fetchval(
-        'SELECT email FROM "user" WHERE username = $1 AND email != $2',
-        update.new_username,
-        email
-    )
-    if existing_username:
-        raise HTTPException(
-            status_code=400, detail="Username already taken"
         )
 
     result = await conn.execute(
@@ -487,8 +468,8 @@ async def move_plant(
     return {"message": "Plant moved successfully", "x": position.x, "y": position.y}
 
 
-@app.patch("/users/{email}/plants/{plant_id}/start-growing")
-async def start_growing_plant(
+@app.patch("/users/{email}/plants/{plant_id}/apply-water")
+async def apply_water(
     email: str,
     plant_id: int,
     conn: asyncpg.Connection = Depends(get_db),
@@ -501,7 +482,7 @@ async def start_growing_plant(
 
     async with conn.transaction():
         plant = await conn.fetchrow(
-            "SELECT stage, rarity FROM plant WHERE plant_id = $1 AND email = $2",
+            "SELECT stage FROM plant WHERE plant_id = $1 AND email = $2",
             plant_id,
             email,
         )
@@ -510,71 +491,104 @@ async def start_growing_plant(
             raise HTTPException(status_code=404, detail="Plant not found")
 
         stage = plant["stage"]
-        rarity = plant["rarity"]
 
-        if stage == 0:
-            required_water = 1
-            user = await conn.fetchrow('SELECT water FROM "user" WHERE email = $1', email)
-            
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found")
-            
-            if user["water"] < required_water:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Insufficient water. Need {required_water}, have {user['water']}"
-                )
-            
-            await conn.execute(
-                'UPDATE "user" SET water = water - $1 WHERE email = $2',
-                required_water,
-                email
+        if stage != 0:
+            raise HTTPException(
+                status_code=400, detail="Can only water plants at stage 0"
             )
-            
-            growth_time = 30
-            
-            await conn.execute(
-                "UPDATE plant SET growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
-                growth_time,
-                plant_id,
-                email,
-            )
-            
-            new_water = await conn.fetchval('SELECT water FROM "user" WHERE email = $1', email)
-            
-            return {
-                "message": "Plant started growing",
-                "consumed": {"water": required_water},
-                "new_water": new_water,
-                "growth_time_remaining": growth_time
-            }
+
+        user = await conn.fetchrow('SELECT water FROM "user" WHERE email = $1', email)
         
-        elif stage == 1:
-            fertilizer_required = {0: 1, 1: 2, 2: 5}
-            required_fertilizer = fertilizer_required[rarity]
-            
-            growth_times = {0: 60, 1: 120, 2: 360}
-            growth_time = growth_times[rarity]
-            
-            user = await conn.fetchrow('SELECT fertilizer FROM "user" WHERE email = $1', email)
-            
-            if not user:
-                raise HTTPException(status_code=404, detail="User not found")
-            
-            if user["fertilizer"] < required_fertilizer:
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"Insufficient fertilizer. Need {required_fertilizer}, have {user['fertilizer']}"
-                )
-            
-            await conn.execute(
-                'UPDATE "user" SET fertilizer = fertilizer - $1 WHERE email = $2',
-                required_fertilizer,
-                email
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if user["water"] < 1:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Insufficient water. Need 1, have {user['water']}"
             )
+        
+        await conn.execute(
+            'UPDATE "user" SET water = water - 1 WHERE email = $1',
+            email
+        )
+        
+        growth_time = 30
+        
+        await conn.execute(
+            "UPDATE plant SET growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
+            growth_time,
+            plant_id,
+            email,
+        )
+        
+        new_water = await conn.fetchval('SELECT water FROM "user" WHERE email = $1', email)
+        
+        return {
+            "message": "Water applied, plant started growing",
+            "new_water": new_water,
+            "growth_time_remaining": growth_time
+        }
+
+@app.patch("/users/{email}/plants/{plant_id}/apply-fertilizer")
+async def apply_fertilizer(
+    email: str,
+    plant_id: int,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's plants"
+        )
+
+    async with conn.transaction():
+        plant = await conn.fetchrow(
+            "SELECT stage, fertilizer_remaining, rarity FROM plant WHERE plant_id = $1 AND email = $2",
+            plant_id,
+            email,
+        )
+
+        if not plant:
+            raise HTTPException(status_code=404, detail="Plant not found")
+
+        stage = plant["stage"]
+        fertilizer_remaining = plant["fertilizer_remaining"]
+
+        if stage != 1:
+            raise HTTPException(
+                status_code=400, detail="Can only fertilize plants at stage 1"
+            )
+
+        if fertilizer_remaining is None or fertilizer_remaining == 0:
+            raise HTTPException(
+                status_code=400, detail="Plant doesn't need fertilizer"
+            )
+
+        user = await conn.fetchrow('SELECT fertilizer FROM "user" WHERE email = $1', email)
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if user["fertilizer"] < 1:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Insufficient fertilizer. Need 1, have {user['fertilizer']}"
+            )
+        
+        await conn.execute(
+            'UPDATE "user" SET fertilizer = fertilizer - 1 WHERE email = $1',
+            email
+        )
+        
+        new_fertilizer_remaining = fertilizer_remaining - 1
+        
+        if new_fertilizer_remaining == 0:
+            growth_times = {0: 60, 1: 120, 2: 360}
+            growth_time = growth_times[plant["rarity"]]
             
             await conn.execute(
-                "UPDATE plant SET growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
+                "UPDATE plant SET fertilizer_remaining = NULL, growth_time_remaining = $1 WHERE plant_id = $2 AND email = $3",
                 growth_time,
                 plant_id,
                 email
@@ -583,17 +597,27 @@ async def start_growing_plant(
             new_fertilizer = await conn.fetchval('SELECT fertilizer FROM "user" WHERE email = $1', email)
             
             return {
-                "message": "Plant started growing",
-                "consumed": {"fertilizer": required_fertilizer},
+                "message": "Fertilizer applied, plant started growing",
                 "new_fertilizer": new_fertilizer,
+                "fertilizer_remaining": None,
                 "growth_time_remaining": growth_time
             }
-        
         else:
-            raise HTTPException(
-                status_code=400, detail="Plant is already fully grown (stage 2)"
+            await conn.execute(
+                "UPDATE plant SET fertilizer_remaining = $1 WHERE plant_id = $2 AND email = $3",
+                new_fertilizer_remaining,
+                plant_id,
+                email
             )
-
+            
+            new_fertilizer = await conn.fetchval('SELECT fertilizer FROM "user" WHERE email = $1', email)
+            
+            return {
+                "message": "Fertilizer applied",
+                "new_fertilizer": new_fertilizer,
+                "fertilizer_remaining": new_fertilizer_remaining,
+                "growth_time_remaining": None
+            }
 
 @app.patch("/users/{email}/plants/{plant_id}/grow")
 async def grow_plant_by_time(
@@ -721,17 +745,19 @@ async def sell_plant(
     }
 
 
+@app.get("/users")
+async def get_users(
+    conn: asyncpg.Connection = Depends(get_db),
+):
+    users = await conn.fetch('SELECT * FROM "user"')
+    return {"users": [dict(u) for u in users]}
+
+
 @app.get("/users/{email}")
 async def get_user(
     email: str,
     conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
 ):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot view another user's information"
-        )
-
     user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
@@ -742,13 +768,7 @@ async def get_user_plant(
     email: str,
     plant_id: int,
     conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
 ):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot view another user's plant"
-        )
-
     plant = await conn.fetchrow(
         "SELECT * FROM plant WHERE plant_id = $1 AND email = $2",
         plant_id,
@@ -764,13 +784,7 @@ async def get_user_plant(
 async def get_user_plants(
     email: str,
     conn: asyncpg.Connection = Depends(get_db),
-    auth_email: str = Depends(verify_clerk_token),
 ):
-    if email != auth_email:
-        raise HTTPException(
-            status_code=403, detail="Cannot view another user's plants"
-        )
-
     plants = await conn.fetch(
         "SELECT * FROM plant WHERE email = $1",
         email,
