@@ -781,6 +781,7 @@ async def get_users(
     users = await conn.fetch('SELECT * FROM "user" ORDER BY money DESC')
     return {"users": [dict(u) for u in users]}
 
+
 @app.get("/users/{email}")
 async def get_user(
     email: str,
@@ -791,7 +792,8 @@ async def get_user(
         raise HTTPException(status_code=404, detail="User not found")
     return dict(user)
 
-@app.get("/users/{username}/{tag}")
+
+@app.get("/users/by-username/{username}/{tag}")
 async def get_user_from_username(
     username: str,
     tag: str,
