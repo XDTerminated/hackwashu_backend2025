@@ -36,6 +36,7 @@ FERTILIZER_COST = 25
 PLANT_COST = 100
 INITIAL_USER_MONEY = 250.0
 INITIAL_PLANT_LIMIT = 25
+INITIAL_WEATHER = 0
 PLANT_LIMIT_BASE_COST = 1000
 PLANT_LIMIT_COST_MULTIPLIER = 1.1
 PLANT_LIMIT_INCREASE = 25
@@ -69,6 +70,14 @@ STAGE_1_GROWTH_TIMES = {0: 60, 1: 120, 2: 360}
 
 STAGE_1_SELL_VALUES = {0: 50, 1: 100, 2: 250}
 STAGE_2_SELL_VALUES = {0: 100, 1: 200, 2: 500}
+
+
+def generate_random_size():
+    """Generate a random size between 0 and 1 using normal distribution."""
+    # Use normal distribution with mean=0.5, std=0.15
+    # Clamp to [0, 1] range
+    size = random.gauss(0.5, 0.15)
+    return max(0.0, min(1.0, size))
 
 
 async def get_db():
@@ -168,11 +177,12 @@ async def create_user(
         username = user.email.split('@')[0]
 
         await conn.execute(
-            'INSERT INTO "user" (username, email, money, plant_limit) VALUES ($1, $2, $3, $4)',
+            'INSERT INTO "user" (username, email, money, plant_limit, weather) VALUES ($1, $2, $3, $4, $5)',
             username,
             user.email,
             INITIAL_USER_MONEY,
             INITIAL_PLANT_LIMIT,
+            INITIAL_WEATHER,
         )
         return {
             "message": "User created successfully",
@@ -180,6 +190,7 @@ async def create_user(
             "username": username,
             "money": INITIAL_USER_MONEY,
             "plant_limit": INITIAL_PLANT_LIMIT,
+            "weather": INITIAL_WEATHER,
         }
     except asyncpg.UniqueViolationError:
         raise HTTPException(
@@ -305,6 +316,38 @@ async def increase_plant_limit(
     }
 
 
+@app.post("/users/{email}/cycle-weather")
+async def cycle_weather(
+    email: str,
+    conn: asyncpg.Connection = Depends(get_db),
+    auth_email: str = Depends(verify_clerk_token),
+):
+    if email != auth_email:
+        raise HTTPException(
+            status_code=403, detail="Cannot modify another user's weather"
+        )
+
+    user = await conn.fetchrow('SELECT weather FROM "user" WHERE email = $1', email)
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    current_weather = user["weather"]
+    new_weather = (current_weather + 1) % 3
+    
+    await conn.execute(
+        'UPDATE "user" SET weather = $1 WHERE email = $2',
+        new_weather,
+        email
+    )
+    
+    return {
+        "message": "Weather cycled successfully",
+        "previous_weather": current_weather,
+        "new_weather": new_weather
+    }
+
+
 @app.post("/users/{email}/plants/", status_code=201)
 async def create_plant(
     email: str,
@@ -354,6 +397,9 @@ async def create_plant(
 
         species_list = PLANT_SPECIES[plant.plant_type][rarity]
         plant_species = random.choice(species_list)
+        
+        # Generate random size using normal distribution
+        plant_size = generate_random_size()
 
         await conn.execute(
             'UPDATE "user" SET money = money - $1 WHERE email = $2',
@@ -366,7 +412,7 @@ async def create_plant(
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING plant_id""",
             plant.plant_type,
             plant_species,
-            0.0,
+            plant_size,
             rarity,
             plant.x,
             plant.y,
@@ -382,6 +428,7 @@ async def create_plant(
         "plant_id": plant_id,
         "plant_type": plant.plant_type,
         "plant_species": plant_species,
+        "size": plant_size,
         "rarity": rarity,
         "money_spent": PLANT_COST,
         "new_balance": new_balance
