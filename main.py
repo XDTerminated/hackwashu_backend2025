@@ -781,9 +781,18 @@ async def get_users(
     users = await conn.fetch('SELECT * FROM "user" ORDER BY money DESC')
     return {"users": [dict(u) for u in users]}
 
+@app.get("/users/{email}")
+async def get_user(
+    email: str,
+    conn: asyncpg.Connection = Depends(get_db),
+):
+    user = await conn.fetchrow('SELECT * FROM "user" WHERE email = $1', email)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return dict(user)
 
 @app.get("/users/{username}/{tag}")
-async def get_user(
+async def get_user_from_username(
     username: str,
     tag: str,
     conn: asyncpg.Connection = Depends(get_db),
