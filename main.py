@@ -171,29 +171,36 @@ async def create_user(
             status_code=403, detail="Cannot create user with different email"
         )
 
-    try:
-        username = user.email.split('@')[0]
+    existing = await conn.fetchval('SELECT 1 FROM "user" WHERE email = $1', user.email)
+    if existing:
+        raise HTTPException(status_code=400, detail="User with this email already exists")
 
-        await conn.execute(
-            'INSERT INTO "user" (username, email, money, plant_limit, weather) VALUES ($1, $2, $3, $4, $5)',
-            username,
-            user.email,
-            INITIAL_USER_MONEY,
-            INITIAL_PLANT_LIMIT,
-            INITIAL_WEATHER,
-        )
-        return {
-            "message": "User created successfully",
-            "email": user.email,
-            "username": username,
-            "money": INITIAL_USER_MONEY,
-            "plant_limit": INITIAL_PLANT_LIMIT,
-            "weather": INITIAL_WEATHER,
-        }
-    except asyncpg.UniqueViolationError:
-        raise HTTPException(
-            status_code=400, detail="User with this email already exists"
-        )
+    base_username = user.email.split('@')[0]
+
+    for i in range(10000):
+        candidate = f"{base_username}#{i:04d}"
+        try:
+            await conn.execute(
+                'INSERT INTO "user" (username, email, money, plant_limit, weather) VALUES ($1, $2, $3, $4, $5)',
+                candidate,
+                user.email,
+                INITIAL_USER_MONEY,
+                INITIAL_PLANT_LIMIT,
+                INITIAL_WEATHER,
+            )
+
+            return {
+                "message": "User created successfully",
+                "email": user.email,
+                "username": candidate,
+                "money": INITIAL_USER_MONEY,
+                "plant_limit": INITIAL_PLANT_LIMIT,
+                "weather": INITIAL_WEATHER,
+            }
+        except asyncpg.UniqueViolationError:
+            continue
+
+    raise HTTPException(status_code=500, detail="Unable to generate a unique username")
 
 
 @app.patch("/users/{email}/username")
