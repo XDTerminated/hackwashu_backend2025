@@ -771,7 +771,7 @@ async def sell_plant(
 async def get_users(
     conn: asyncpg.Connection = Depends(get_db),
 ):
-    users = await conn.fetch('SELECT * FROM "user"')
+    users = await conn.fetch('SELECT * FROM "user" ORDER BY money DESC')
     return {"users": [dict(u) for u in users]}
 
 
