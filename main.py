@@ -76,7 +76,7 @@ def generate_random_size():
     """Generate a random size between 0 and 1 using normal distribution."""
     # Use normal distribution with mean=0.5, std=0.15
     # Clamp to [0, 1] range
-    size = random.gauss(0.5, 0.15)
+    size = random.gauss(0.5, 0.2)
     return max(0.0, min(1.0, size))
 
 
