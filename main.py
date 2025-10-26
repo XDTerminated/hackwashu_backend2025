@@ -53,7 +53,7 @@ PLANT_SPECIES = {
         2: ["withered_rose"]
     },
     "berry": {
-        0: ["blueberries"],
+        0: ["blueberry"],
         1: ["strawberry"],
         2: ["ancient_fruit"]
     },
