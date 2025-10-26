@@ -74,8 +74,6 @@ STAGE_2_SELL_VALUES = {0: 100, 1: 200, 2: 500}
 
 def generate_random_size():
     """Generate a random size between 0 and 1 using normal distribution."""
-    # Use normal distribution with mean=0.5, std=0.15
-    # Clamp to [0, 1] range
     size = random.gauss(0.5, 0.2)
     return max(0.0, min(1.0, size))
 
@@ -644,7 +642,7 @@ async def grow_plant_by_time(
 
     async with conn.transaction():
         plant = await conn.fetchrow(
-            "SELECT growth_time_remaining, stage FROM plant WHERE plant_id = $1 AND email = $2",
+            "SELECT growth_time_remaining, stage, rarity FROM plant WHERE plant_id = $1 AND email = $2",
             plant_id,
             email,
         )
@@ -661,26 +659,42 @@ async def grow_plant_by_time(
 
         if new_time == 0:
             current_stage = plant["stage"]
-            
+
             if current_stage >= 2:
                 raise HTTPException(
                     status_code=400, detail="Plant is already at maximum stage"
                 )
-            
+
             new_stage = current_stage + 1
-            
-            await conn.execute(
-                "UPDATE plant SET stage = $1, growth_time_remaining = NULL WHERE plant_id = $2 AND email = $3",
-                new_stage,
-                plant_id,
-                email,
-            )
-            
+
+            # If advancing to stage 1, initialize fertilizer_remaining based on rarity
+            if new_stage == 1:
+                rarity = plant.get("rarity", 0)
+                # Map rarity to fertilizer counts: 0 -> 1, 1 -> 2, 2 -> 5
+                fertilizer_map = {0: 1, 1: 2, 2: 5}
+                fertilizer_init = fertilizer_map.get(rarity, 1)
+
+                await conn.execute(
+                    "UPDATE plant SET stage = $1, growth_time_remaining = NULL, fertilizer_remaining = $2 WHERE plant_id = $3 AND email = $4",
+                    new_stage,
+                    fertilizer_init,
+                    plant_id,
+                    email,
+                )
+            else:
+                # Advancing to stage 2 or higher: clear fertilizer_remaining
+                await conn.execute(
+                    "UPDATE plant SET stage = $1, growth_time_remaining = NULL, fertilizer_remaining = NULL WHERE plant_id = $2 AND email = $3",
+                    new_stage,
+                    plant_id,
+                    email,
+                )
+
             return {
                 "message": "Plant growth completed and advanced to next stage",
                 "growth_time_remaining": None,
                 "new_stage": new_stage,
-                "stage_advanced": True
+                "stage_advanced": True,
             }
         else:
             await conn.execute(
